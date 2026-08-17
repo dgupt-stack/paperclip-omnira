@@ -1,0 +1,4 @@
+node_modules/
+.paperclip-omnira/
+.paperclip-omnira-test/
+npm-debug.log*
