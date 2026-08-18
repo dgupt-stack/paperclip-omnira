@@ -3,6 +3,7 @@ import { rmdirSync, unlinkSync } from "node:fs";
 import { hostname } from "node:os";
 import { basename, dirname, extname } from "node:path";
 import { createServer } from "node:http";
+import { gzipSync } from "node:zlib";
 import { EMBEDDED_UI_ASSETS } from "./generated/embedded-assets.mjs";
 import jsdomSyncXhrWorkerPath from "./generated/jsdom-xhr-sync-worker.bundle.js" with { type: "file" };
 import { createEntityPglite } from "./lib/entity-pglite.mjs";
@@ -100,6 +101,9 @@ async function preloadUi() {
     const data = Buffer.from(await Bun.file(asset.embeddedPath).arrayBuffer());
     assets.set(asset.publicPath, {
       data,
+      gzipData: data.length >= 256 * 1024
+        ? gzipSync(data, { level: 9 })
+        : null,
       contentType: contentType(asset.publicPath),
       etag: `"${sha256(data)}"`,
     });
@@ -395,18 +399,33 @@ activeRequestHandler = (request, response) => {
     sendJson(response, 404, { error: "Asset not found" });
     return;
   }
-  if (request.headers["if-none-match"] === asset.etag) {
+  const acceptsGzip = String(request.headers["accept-encoding"] || "")
+    .split(",")
+    .some((value) => {
+      const [encoding, ...parameters] = value.trim().toLowerCase().split(";");
+      if (encoding !== "gzip") return false;
+      const quality = parameters
+        .map((parameter) => parameter.trim())
+        .find((parameter) => parameter.startsWith("q="));
+      return !quality || Number(quality.slice(2)) > 0;
+    });
+  const useGzip = Boolean(asset.gzipData && acceptsGzip);
+  const responseData = useGzip ? asset.gzipData : asset.data;
+  const responseEtag = useGzip ? asset.etag.replace(/"$/, "-gzip\"") : asset.etag;
+  if (request.headers["if-none-match"] === responseEtag) {
     response.writeHead(304);
     response.end();
     return;
   }
   response.writeHead(200, {
     "Cache-Control": isAssetRequest ? "public, max-age=31536000, immutable" : "no-cache",
-    "Content-Length": asset.data.length,
+    "Content-Length": responseData.length,
     "Content-Type": asset.contentType,
-    ETag: asset.etag,
+    ...(useGzip ? { "Content-Encoding": "gzip" } : {}),
+    ETag: responseEtag,
+    Vary: "Accept-Encoding",
   });
-  response.end(request.method === "HEAD" ? undefined : asset.data);
+  response.end(request.method === "HEAD" ? undefined : responseData);
 };
 setupLiveEventsWebSocketServer(server, pglite.db, {
   deploymentMode: config.deploymentMode,
