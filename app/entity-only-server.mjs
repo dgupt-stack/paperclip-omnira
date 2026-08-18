@@ -14,9 +14,13 @@ import {
 const VERSION = "2026.722.0-entity.1";
 const INSTANCE_ID = process.env.PAPERCLIP_INSTANCE_ID?.trim() || "default";
 const PORT = Math.max(1, Number(process.env.PORT || process.env.PAPERCLIP_PORT || 3100));
+const IS_OMNIRA_MANAGED = Boolean(
+  process.env.OMNIRA_ENVIRONMENT
+  || process.env.PAPERCLIP_LAUNCHER_MANAGED === "1",
+);
 const PUBLIC_URL = (
   process.env.PAPERCLIP_PUBLIC_URL?.trim()
-  || (process.env.OMNIRA_ENVIRONMENT
+  || (IS_OMNIRA_MANAGED
     ? "https://paperclip-k4u67azzg5.app.omnira.dev"
     : `http://127.0.0.1:${PORT}`)
 ).replace(/\/$/, "");
