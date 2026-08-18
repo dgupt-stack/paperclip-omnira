@@ -13,6 +13,14 @@ execution engine, while the wrapper provides:
 - automatic restore and promotion when a fresh device becomes leader
 - a `GET /_omnira/storage` proof/health endpoint
 
+The repository root is a small Go launcher so Omnira recognizes the project as
+a long-running compiled service instead of a static Node site. On a device's
+first start it extracts the JavaScript wrapper from `app/`, installs production
+dependencies with an available Node.js 20+ runtime, then replaces itself with
+Paperclip. If Node.js is unavailable, it downloads a checksum-pinned Bun
+runtime for the current Omnira device. Service secrets are deliberately removed
+from the dependency installer's environment.
+
 The default backup interval is 60 seconds, so an abrupt device loss can lose up
 to roughly one interval of recent writes. Use a shared managed PostgreSQL server
 instead when zero-RPO failover is required.
@@ -43,6 +51,10 @@ PAPERCLIP_INSTANCE_ID=default
 ## Run and verify
 
 ```sh
+go build ./...
+go test ./...
+
+cd app
 npm ci
 npm run build
 npm test
