@@ -468,6 +468,18 @@ const leaseTimer = setInterval(() => {
       state.leaseLost = true;
       state.phase = "lease-lost";
       console.error("[paperclip-entity] Entity Service writer lease was lost");
+      clearInterval(leaseTimer);
+      clearInterval(periodicBackupTimer);
+      if (backupTimer) clearTimeout(backupTimer);
+
+      // This process no longer has authority to serve writes or publish a
+      // snapshot. Exit promptly so Omnira can replace the stale tunnel with a
+      // fresh process that restores the last durable Entity snapshot and
+      // acquires the current writer lease.
+      server.closeIdleConnections?.();
+      server.close();
+      void pglite.close().finally(() => process.exit(1));
+      setTimeout(() => process.exit(1), 2_000).unref?.();
     }
   }).catch((error) => {
     state.lastBackupError = `Lease renewal failed: ${error.message}`;
