@@ -17,10 +17,11 @@ durable backing store**. It runs PostgreSQL-compatible SQL in an in-memory
 The production build is one compiled Bun executable containing Paperclip,
 PGlite, PostgreSQL extensions, all 182 upstream migrations, and all UI assets.
 The repository root is a small Go launcher so Omnira recognizes it as a compiled
-service. The launcher expands the compressed executable, waits until Paperclip
-has restored Entity state and preloaded every embedded asset, then unlinks the
-temporary executable and directory. There is no runtime package install and no
-runtime file that Omnira cleanup can remove.
+service. The launcher expands the compressed executable and immediately replaces
+itself with that runtime before opening the public port. Paperclip opens its
+startup/status listener first, restores Entity state, preloads every embedded
+asset, and then unlinks the temporary executable and directory. There is no
+runtime package install or durable local runtime file.
 
 Database snapshots are scheduled after successful mutating requests and on
 graceful shutdown. A periodic integrity pass backs up only when the database is
