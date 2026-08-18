@@ -1,6 +1,7 @@
 import { createHash, createHmac, randomUUID } from "node:crypto";
+import { rmdirSync, unlinkSync } from "node:fs";
 import { hostname } from "node:os";
-import { extname } from "node:path";
+import { basename, dirname, extname } from "node:path";
 import { createServer } from "node:http";
 import { EMBEDDED_UI_ASSETS } from "./generated/embedded-assets.mjs";
 import { createEntityPglite } from "./lib/entity-pglite.mjs";
@@ -159,6 +160,36 @@ const state = {
   leaseLost: false,
   uiAssetsEmbedded: 0,
 };
+
+let activeRequestHandler = null;
+const server = createServer((request, response) => {
+  if (activeRequestHandler) {
+    activeRequestHandler(request, response);
+    return;
+  }
+  const url = new URL(request.url || "/", PUBLIC_URL);
+  if (url.pathname === "/_omnira/storage") {
+    sendJson(response, 503, publicStatus(state));
+    return;
+  }
+  response.writeHead(200, {
+    "Cache-Control": "no-store",
+    "Content-Type": "text/html; charset=utf-8",
+    "Retry-After": "3",
+  });
+  response.end(`<!doctype html><html lang="en"><meta charset="utf-8"><meta http-equiv="refresh" content="3"><title>Paperclip is starting</title><style>body{font:16px/1.5 system-ui;margin:0;background:#f6f3ec;color:#29261f}main{max-width:680px;margin:10vh auto;padding:40px;border:1px solid #d8d3c8;border-radius:18px;background:white}p{color:#625d52}</style><main><h1>Paperclip is starting</h1><p>${state.phase.replaceAll("-", " ")}. This page refreshes automatically.</p></main></html>`);
+});
+server.keepAliveTimeout = 185_000;
+server.headersTimeout = 186_000;
+const inheritedListenFd = Number(process.env.PAPERCLIP_LISTEN_FD || 0);
+await new Promise((resolve, reject) => {
+  server.once("error", reject);
+  if (Number.isInteger(inheritedListenFd) && inheritedListenFd > 2) {
+    server.listen({ fd: inheritedListenFd }, resolve);
+  } else {
+    server.listen(PORT, "0.0.0.0", resolve);
+  }
+});
 
 const entityClient = new EntityStoreClient(entityConfig);
 const databaseSnapshots = new EntitySnapshotStore({
@@ -331,7 +362,7 @@ const app = await createApp(pglite.db, {
 await persistSnapshot("startup", { force: pglite.migrationStatus.appliedNow > 0 || !restored });
 
 const apiPrefixes = ["/api", "/mcp", "/_plugins"];
-const server = createServer((request, response) => {
+activeRequestHandler = (request, response) => {
   const url = new URL(request.url || "/", PUBLIC_URL);
   if (url.pathname === "/_omnira/storage") {
     sendJson(response, state.phase === "ready" ? 200 : 503, publicStatus(state));
@@ -373,19 +404,25 @@ const server = createServer((request, response) => {
     ETag: asset.etag,
   });
   response.end(request.method === "HEAD" ? undefined : asset.data);
-});
-server.keepAliveTimeout = 185_000;
-server.headersTimeout = 186_000;
+};
 setupLiveEventsWebSocketServer(server, pglite.db, {
   deploymentMode: config.deploymentMode,
   resolveSessionFromHeaders,
 });
 
-await new Promise((resolve, reject) => {
-  server.once("error", reject);
-  server.listen(PORT, "0.0.0.0", resolve);
-});
 state.phase = "ready";
+
+if (process.env.PAPERCLIP_LAUNCHER_MANAGED === "1") {
+  const executableDirectory = dirname(process.execPath);
+  if (basename(executableDirectory).startsWith(".paperclip-entity-runtime-")) {
+    try {
+      unlinkSync(process.execPath);
+      rmdirSync(executableDirectory);
+    } catch (error) {
+      console.warn(`[paperclip-entity] transient runtime cleanup failed: ${error.message}`);
+    }
+  }
+}
 
 const localClaimUrl = getBoardClaimWarningUrl("127.0.0.1", PORT);
 if (localClaimUrl) {

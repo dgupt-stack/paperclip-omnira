@@ -11,8 +11,6 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"os"
-	"os/exec"
-	"os/signal"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -37,20 +35,24 @@ func run() error {
 	if len(standaloneArchive) == 0 {
 		return fmt.Errorf("strict Entity-only Paperclip is not packaged for this platform")
 	}
-	childPort, err := availableLoopbackPort()
+	if err := os.Setenv("PORT", binding.port); err != nil {
+		return fmt.Errorf("set service port: %w", err)
+	}
+	childReady := &atomic.Bool{}
+	bootstrapServer, err := startGateway(binding, "1", childReady)
 	if err != nil {
 		return err
 	}
-	if err := os.Setenv("PORT", childPort); err != nil {
-		return fmt.Errorf("set child service port: %w", err)
-	}
-	childReady := &atomic.Bool{}
+	defer bootstrapServer.Close()
 
-	// Extract before opening the gateway. Omnira cleans the writable sandbox as
-	// soon as the public port listens, so the child must already be exec'd when
-	// that happens. The running process keeps its mapped executable even after
-	// the transient source file is unlinked by the runner.
-	temporaryDir, err := os.MkdirTemp("", "paperclip-entity-launcher-")
+	homeDirectory, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("resolve transient runtime home: %w", err)
+	}
+	for _, staleDirectory := range staleRuntimeDirectories(homeDirectory) {
+		_ = os.RemoveAll(staleDirectory)
+	}
+	temporaryDir, err := os.MkdirTemp(homeDirectory, ".paperclip-entity-runtime-")
 	if err != nil {
 		return fmt.Errorf("create transient runtime directory: %w", err)
 	}
@@ -60,66 +62,28 @@ func run() error {
 		return err
 	}
 
-	cmd := exec.Command(executablePath)
-	cmd.Env = append(os.Environ(), "PAPERCLIP_LAUNCHER_MANAGED=1")
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("start strict Entity-only Paperclip: %w", err)
+	if err := os.Setenv("PAPERCLIP_LAUNCHER_MANAGED", "1"); err != nil {
+		return fmt.Errorf("mark managed launcher: %w", err)
 	}
-	gateway, err := startGateway(binding, childPort, childReady)
-	if err != nil {
-		_ = cmd.Process.Kill()
-		return err
+	if err := os.Unsetenv("PAPERCLIP_LISTEN_FD"); err != nil {
+		return fmt.Errorf("clear inherited listener: %w", err)
 	}
-	defer gateway.Close()
-	waitResult := make(chan error, 1)
-	go func() { waitResult <- cmd.Wait() }()
-	if err := waitForChildReady(childPort, waitResult, 10*time.Minute); err != nil {
-		_ = cmd.Process.Kill()
-		return err
+	// Give the edge runner enough time to observe the bootstrap listener before
+	// replacing this process. Paperclip binds the same port at the very start of
+	// its executable, before restoring Entity data or initializing PGlite.
+	time.Sleep(500 * time.Millisecond)
+	if err := bootstrapServer.Close(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		return fmt.Errorf("stop bootstrap listener: %w", err)
 	}
-	childReady.Store(true)
+	return syscall.Exec(executablePath, []string{executablePath}, os.Environ())
+}
 
-	// Paperclip reports readiness only after PGlite, migrations, auth, and every
-	// embedded UI asset are in memory. Unlink the executable immediately then:
-	// the edge runner has no runtime directory to delete out from under it.
-	if err := os.Remove(executablePath); err != nil && !errors.Is(err, os.ErrNotExist) {
-		_ = cmd.Process.Kill()
-		return fmt.Errorf("unlink temporary Paperclip executable: %w", err)
-	}
-	if err := os.Remove(temporaryDir); err != nil && !errors.Is(err, os.ErrNotExist) {
-		_ = cmd.Process.Kill()
-		return fmt.Errorf("remove temporary runtime directory: %w", err)
-	}
-
-	signals := make(chan os.Signal, 2)
-	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
-	defer signal.Stop(signals)
-	done := make(chan struct{})
-	var forwardedSignal atomic.Bool
-	go func() {
-		select {
-		case incoming := <-signals:
-			forwardedSignal.Store(true)
-			_ = cmd.Process.Signal(incoming)
-		case <-done:
-		}
-	}()
-	err = <-waitResult
-	close(done)
+func staleRuntimeDirectories(homeDirectory string) []string {
+	matches, err := filepath.Glob(filepath.Join(homeDirectory, ".paperclip-entity-runtime-*"))
 	if err != nil {
-		if forwardedSignal.Load() {
-			return nil
-		}
-		var exitError *exec.ExitError
-		if errors.As(err, &exitError) {
-			return fmt.Errorf("Paperclip exited with status %d", exitError.ExitCode())
-		}
-		return fmt.Errorf("wait for Paperclip: %w", err)
+		return nil
 	}
-	return nil
+	return matches
 }
 
 func availableLoopbackPort() (string, error) {
