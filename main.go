@@ -51,9 +51,17 @@ func run() error {
 	}
 	defer gateway.Close()
 
-	temporaryDir, err := os.MkdirTemp("", "paperclip-entity-launcher-")
+	launcherPath, err := os.Executable()
 	if err != nil {
-		return fmt.Errorf("create temporary runtime directory: %w", err)
+		return fmt.Errorf("locate launcher executable: %w", err)
+	}
+	// Omnira materializes the launcher on a transient RAM volume. Keep the
+	// embedded child beside it: the runner may clean its sandbox TMPDIR as soon
+	// as the gateway listens, but the RAM volume remains available to this
+	// process. The child is unlinked immediately after Paperclip is ready.
+	temporaryDir, err := os.MkdirTemp(filepath.Dir(launcherPath), "paperclip-entity-launcher-")
+	if err != nil {
+		return fmt.Errorf("create transient RAM-volume runtime directory: %w", err)
 	}
 	defer os.RemoveAll(temporaryDir)
 	executablePath := filepath.Join(temporaryDir, "paperclip-entity")
