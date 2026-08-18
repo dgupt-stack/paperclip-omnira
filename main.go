@@ -45,23 +45,14 @@ func run() error {
 		return fmt.Errorf("set child service port: %w", err)
 	}
 	childReady := &atomic.Bool{}
-	gateway, err := startGateway(binding, childPort, childReady)
-	if err != nil {
-		return err
-	}
-	defer gateway.Close()
 
-	launcherPath, err := os.Executable()
+	// Extract before opening the gateway. Omnira cleans the writable sandbox as
+	// soon as the public port listens, so the child must already be exec'd when
+	// that happens. The running process keeps its mapped executable even after
+	// the transient source file is unlinked by the runner.
+	temporaryDir, err := os.MkdirTemp("", "paperclip-entity-launcher-")
 	if err != nil {
-		return fmt.Errorf("locate launcher executable: %w", err)
-	}
-	// Omnira materializes the launcher on a transient RAM volume. Keep the
-	// embedded child beside it: the runner may clean its sandbox TMPDIR as soon
-	// as the gateway listens, but the RAM volume remains available to this
-	// process. The child is unlinked immediately after Paperclip is ready.
-	temporaryDir, err := os.MkdirTemp(filepath.Dir(launcherPath), "paperclip-entity-launcher-")
-	if err != nil {
-		return fmt.Errorf("create transient RAM-volume runtime directory: %w", err)
+		return fmt.Errorf("create transient runtime directory: %w", err)
 	}
 	defer os.RemoveAll(temporaryDir)
 	executablePath := filepath.Join(temporaryDir, "paperclip-entity")
@@ -77,6 +68,12 @@ func run() error {
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("start strict Entity-only Paperclip: %w", err)
 	}
+	gateway, err := startGateway(binding, childPort, childReady)
+	if err != nil {
+		_ = cmd.Process.Kill()
+		return err
+	}
+	defer gateway.Close()
 	waitResult := make(chan error, 1)
 	go func() { waitResult <- cmd.Wait() }()
 	if err := waitForChildReady(childPort, waitResult, 10*time.Minute); err != nil {
@@ -88,11 +85,11 @@ func run() error {
 	// Paperclip reports readiness only after PGlite, migrations, auth, and every
 	// embedded UI asset are in memory. Unlink the executable immediately then:
 	// the edge runner has no runtime directory to delete out from under it.
-	if err := os.Remove(executablePath); err != nil {
+	if err := os.Remove(executablePath); err != nil && !errors.Is(err, os.ErrNotExist) {
 		_ = cmd.Process.Kill()
 		return fmt.Errorf("unlink temporary Paperclip executable: %w", err)
 	}
-	if err := os.Remove(temporaryDir); err != nil {
+	if err := os.Remove(temporaryDir); err != nil && !errors.Is(err, os.ErrNotExist) {
 		_ = cmd.Process.Kill()
 		return fmt.Errorf("remove temporary runtime directory: %w", err)
 	}
