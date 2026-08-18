@@ -11,6 +11,10 @@ import { dirname } from "node:path";
 // Entity blocks travel through Omnira's gRPC tunnel as base64 JSON. Keep each
 // raw chunk comfortably below the 4 MiB transport frame after encoding.
 const DEFAULT_CHUNK_BYTES = 512 * 1024;
+const TRANSIENT_HTTP_STATUSES = new Set([429, 502, 503, 504]);
+const DEFAULT_MAX_ATTEMPTS = 8;
+const DEFAULT_RETRY_BASE_MS = 250;
+const DEFAULT_RETRY_MAX_MS = 4_000;
 
 function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
@@ -39,7 +43,18 @@ export class EntityStoreError extends Error {
 }
 
 export class EntityStoreClient {
-  constructor({ baseUrl, apiKey, namespace, ownerEntityId, fetchImpl = fetch }) {
+  constructor({
+    baseUrl,
+    apiKey,
+    namespace,
+    ownerEntityId,
+    fetchImpl = fetch,
+    maxAttempts = DEFAULT_MAX_ATTEMPTS,
+    retryBaseMs = DEFAULT_RETRY_BASE_MS,
+    retryMaxMs = DEFAULT_RETRY_MAX_MS,
+    sleepImpl = (milliseconds) =>
+      new Promise((resolve) => setTimeout(resolve, milliseconds)),
+  }) {
     if (!baseUrl) throw new Error("Entity Service base URL is required");
     if (!apiKey) throw new Error("Entity Service API key is required");
     if (!namespace) throw new Error("Entity Service namespace is required");
@@ -52,46 +67,66 @@ export class EntityStoreClient {
     this.namespace = namespace;
     this.ownerEntityId = String(ownerEntityId);
     this.fetchImpl = fetchImpl;
+    this.maxAttempts = maxAttempts;
+    this.retryBaseMs = retryBaseMs;
+    this.retryMaxMs = retryMaxMs;
+    this.sleepImpl = sleepImpl;
   }
 
   async request(method, key, { body } = {}) {
-    let response;
-    try {
-      response = await this.fetchImpl(
-        `${this.baseUrl}${encodedBlockPath(this.namespace, key)}`,
-        {
+    const requestBody = body ? JSON.stringify(body) : undefined;
+    const url = `${this.baseUrl}${encodedBlockPath(this.namespace, key)}`;
+
+    for (let attempt = 1; attempt <= this.maxAttempts; attempt += 1) {
+      let response;
+      try {
+        response = await this.fetchImpl(url, {
           method,
           headers: {
             Accept: "application/json",
             Authorization: `Bearer ${this.apiKey}`,
             ...(body ? { "Content-Type": "application/json" } : {}),
           },
-          ...(body ? { body: JSON.stringify(body) } : {}),
-        },
-      );
-    } catch (cause) {
-      throw new EntityStoreError(`Entity Service ${method} failed: ${cause.message}`, {
-        cause,
-      });
+          ...(body ? { body: requestBody } : {}),
+        });
+      } catch (cause) {
+        throw new EntityStoreError(
+          `Entity Service ${method} failed: ${cause.message}`,
+          { cause },
+        );
+      }
+
+      const responseBody = await response.text();
+      if (!response.ok) {
+        if (
+          TRANSIENT_HTTP_STATUSES.has(response.status) &&
+          attempt < this.maxAttempts
+        ) {
+          const delay = Math.min(
+            this.retryBaseMs * 2 ** (attempt - 1),
+            this.retryMaxMs,
+          );
+          await this.sleepImpl(delay);
+          continue;
+        }
+        throw new EntityStoreError(
+          `Entity Service ${method} ${key} returned HTTP ${response.status}`,
+          { status: response.status, body: responseBody },
+        );
+      }
+
+      if (!responseBody) return {};
+      try {
+        return JSON.parse(responseBody);
+      } catch (cause) {
+        throw new EntityStoreError(
+          `Entity Service ${method} ${key} returned invalid JSON`,
+          { status: response.status, body: responseBody, cause },
+        );
+      }
     }
 
-    const responseBody = await response.text();
-    if (!response.ok) {
-      throw new EntityStoreError(
-        `Entity Service ${method} ${key} returned HTTP ${response.status}`,
-        { status: response.status, body: responseBody },
-      );
-    }
-
-    if (!responseBody) return {};
-    try {
-      return JSON.parse(responseBody);
-    } catch (cause) {
-      throw new EntityStoreError(
-        `Entity Service ${method} ${key} returned invalid JSON`,
-        { status: response.status, body: responseBody, cause },
-      );
-    }
+    throw new EntityStoreError(`Entity Service ${method} ${key} retry limit reached`);
   }
 
   async get(key) {

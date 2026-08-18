@@ -42,6 +42,56 @@ test("EntityStoreClient round-trips bytes and honors CAS generations", async (t)
   assert.equal(updated.generation, 2);
 });
 
+test("EntityStoreClient retries transient tunnel responses with bounded backoff", async () => {
+  let attempts = 0;
+  const delays = [];
+  const client = new EntityStoreClient({
+    baseUrl: "https://entity.example.test",
+    apiKey: "test-key",
+    namespace: "paperclip",
+    ownerEntityId: "360001",
+    maxAttempts: 4,
+    retryBaseMs: 10,
+    retryMaxMs: 15,
+    sleepImpl: async (milliseconds) => delays.push(milliseconds),
+    fetchImpl: async () => {
+      attempts += 1;
+      if (attempts < 3) {
+        return new Response("temporarily unavailable", { status: 503 });
+      }
+      return Response.json({ generation: "7", sizeBytes: "5" });
+    },
+  });
+
+  const saved = await client.put("test/retry.bin", Buffer.from("ready"), {
+    generation: -1,
+  });
+  assert.equal(saved.generation, 7);
+  assert.equal(attempts, 3);
+  assert.deepEqual(delays, [10, 15]);
+});
+
+test("EntityStoreClient does not retry permanent Entity errors", async () => {
+  let attempts = 0;
+  const client = new EntityStoreClient({
+    baseUrl: "https://entity.example.test",
+    apiKey: "test-key",
+    namespace: "paperclip",
+    ownerEntityId: "360001",
+    sleepImpl: async () => assert.fail("permanent errors must not retry"),
+    fetchImpl: async () => {
+      attempts += 1;
+      return new Response("conflict", { status: 409 });
+    },
+  });
+
+  await assert.rejects(
+    client.put("test/conflict.bin", Buffer.from("stale"), { generation: -1 }),
+    (error) => error.conflict,
+  );
+  assert.equal(attempts, 1);
+});
+
 test("EntityLease prevents two Paperclip writers and permits expiry takeover", async (t) => {
   const mock = await startEntityServiceMock();
   t.after(() => mock.close());
