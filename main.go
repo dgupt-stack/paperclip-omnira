@@ -71,7 +71,7 @@ func run() error {
 	}
 	waitResult := make(chan error, 1)
 	go func() { waitResult <- cmd.Wait() }()
-	if err := waitForChildReady(childPort, waitResult, 90*time.Second); err != nil {
+	if err := waitForChildReady(childPort, waitResult, 10*time.Minute); err != nil {
 		_ = cmd.Process.Kill()
 		return err
 	}
