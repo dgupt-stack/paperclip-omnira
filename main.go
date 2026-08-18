@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -17,6 +18,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -34,10 +37,26 @@ const (
 //go:embed app/server.mjs app/package.json app/package-lock.json app/lib/*.mjs
 var appBundle embed.FS
 
+// Omnira's edge runner intentionally supplies a minimal PATH and may not expose
+// the host's Node installation. Embedding the verified Darwin/ARM64 runtime
+// keeps the primary mac-m4/mac-m5 target independent of outbound TLS setup.
+// Other supported platforms retain the checksum-verified download fallback.
+//
+//go:embed assets/bun-darwin-aarch64.zip
+var embeddedBunDarwinArm64 []byte
+
 type jsRuntime struct {
 	executable string
 	install    func(string) error
 }
+
+type serviceBinding struct {
+	host string
+	port string
+}
+
+var bootstrapMessage atomic.Value
+var bootstrapAddresses sync.Map
 
 func main() {
 	if err := run(); err != nil {
@@ -47,6 +66,17 @@ func main() {
 }
 
 func run() error {
+	binding := parseServiceBinding(os.Args[1:])
+	if err := os.Setenv("PORT", binding.port); err != nil {
+		return fmt.Errorf("set service port: %w", err)
+	}
+	bootstrapMessage.Store("Preparing the embedded Paperclip runtime")
+	bootstrapServer, err := startBootstrapServer(binding)
+	if err != nil {
+		return err
+	}
+	defer bootstrapServer.Close()
+
 	cacheRoot, err := launcherCacheRoot()
 	if err != nil {
 		return err
@@ -55,10 +85,12 @@ func run() error {
 		return fmt.Errorf("create launcher cache: %w", err)
 	}
 
+	bootstrapMessage.Store("Selecting the JavaScript runtime")
 	runtimeJS, err := discoverRuntime(cacheRoot)
 	if err != nil {
 		return err
 	}
+	bootstrapMessage.Store("Installing Paperclip production dependencies")
 	appDir, err := ensureApp(cacheRoot, runtimeJS)
 	if err != nil {
 		return err
@@ -70,9 +102,72 @@ func run() error {
 	if err := os.Chdir(appDir); err != nil {
 		return fmt.Errorf("enter app runtime: %w", err)
 	}
+	bootstrapMessage.Store("Starting Paperclip")
+	if err := bootstrapServer.Close(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		return fmt.Errorf("stop bootstrap server: %w", err)
+	}
 
 	fmt.Printf("[paperclip-launcher] starting Paperclip with %s\n", filepath.Base(runtimeJS.executable))
 	return syscall.Exec(runtimeJS.executable, argv, env)
+}
+
+func parseServiceBinding(args []string) serviceBinding {
+	binding := serviceBinding{host: "127.0.0.1", port: strings.TrimSpace(os.Getenv("PORT"))}
+	if binding.port == "" {
+		binding.port = "3100"
+	}
+	for index := 0; index < len(args); index++ {
+		argument := args[index]
+		switch {
+		case strings.HasPrefix(argument, "--port="):
+			binding.port = strings.TrimPrefix(argument, "--port=")
+		case argument == "--port" && index+1 < len(args):
+			index++
+			binding.port = args[index]
+		case strings.HasPrefix(argument, "--host="):
+			binding.host = strings.TrimPrefix(argument, "--host=")
+		case argument == "--host" && index+1 < len(args):
+			index++
+			binding.host = args[index]
+		}
+	}
+	if binding.host == "" {
+		binding.host = "127.0.0.1"
+	}
+	return binding
+}
+
+func startBootstrapServer(binding serviceBinding) (*http.Server, error) {
+	listener, err := net.Listen("tcp", net.JoinHostPort(binding.host, binding.port))
+	if err != nil {
+		return nil, fmt.Errorf("listen for Omnira readiness: %w", err)
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(response http.ResponseWriter, request *http.Request) {
+		response.Header().Set("Cache-Control", "no-store")
+		response.Header().Set("Retry-After", "5")
+		response.Header().Set("Content-Type", "text/html; charset=utf-8")
+		response.WriteHeader(http.StatusOK)
+		message, _ := bootstrapMessage.Load().(string)
+		_, _ = fmt.Fprintf(response, `<!doctype html><html lang="en"><meta charset="utf-8"><meta http-equiv="refresh" content="5"><title>Paperclip is starting</title><style>body{font:16px/1.5 system-ui;margin:0;background:#f6f3ec;color:#29261f}main{max-width:680px;margin:10vh auto;padding:40px;border:1px solid #d8d3c8;border-radius:18px;background:white}p{color:#625d52}</style><main><h1>Paperclip is starting</h1><p>%s. This page refreshes automatically.</p></main></html>`, message)
+	})
+	mux.HandleFunc("/_omnira/storage", func(response http.ResponseWriter, request *http.Request) {
+		response.Header().Set("Cache-Control", "no-store")
+		response.Header().Set("Content-Type", "application/json")
+		response.WriteHeader(http.StatusServiceUnavailable)
+		message, _ := bootstrapMessage.Load().(string)
+		_, _ = fmt.Fprintf(response, `{"ok":false,"mode":"bootstrap","detail":%q}`, message)
+	})
+	server := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+	bootstrapAddresses.Store(server, listener.Addr().String())
+	go func() {
+		defer bootstrapAddresses.Delete(server)
+		if serveErr := server.Serve(listener); serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
+			fmt.Fprintf(os.Stderr, "[paperclip-launcher] bootstrap server: %v\n", serveErr)
+		}
+	}()
+	fmt.Printf("[paperclip-launcher] readiness server listening on %s\n", listener.Addr())
+	return server, nil
 }
 
 func launcherCacheRoot() (string, error) {
@@ -258,8 +353,14 @@ func ensureBun(cacheRoot string) (string, error) {
 	defer os.RemoveAll(stagingDir)
 
 	url := fmt.Sprintf("https://github.com/oven-sh/bun/releases/download/bun-v%s/%s", bunVersion, asset)
-	if err := downloadVerified(url, zipPath, checksum); err != nil {
-		return "", err
+	if runtime.GOOS == "darwin" && runtime.GOARCH == "arm64" {
+		if err := writeEmbeddedRuntime(zipPath, embeddedBunDarwinArm64, checksum); err != nil {
+			return "", err
+		}
+	} else {
+		if err := downloadVerified(url, zipPath, checksum); err != nil {
+			return "", err
+		}
 	}
 	extracted, err := unzipBun(zipPath, stagingDir)
 	if err != nil {
@@ -278,6 +379,17 @@ func ensureBun(cacheRoot string) (string, error) {
 		return "", err
 	}
 	return bunPath, nil
+}
+
+func writeEmbeddedRuntime(destination string, body []byte, expectedChecksum string) error {
+	actual := sha256.Sum256(body)
+	if hex.EncodeToString(actual[:]) != expectedChecksum {
+		return errors.New("embedded Bun runtime checksum mismatch")
+	}
+	if err := os.WriteFile(destination, body, 0o600); err != nil {
+		return fmt.Errorf("write embedded Bun runtime: %w", err)
+	}
+	return nil
 }
 
 func bunAsset() (string, string, error) {
