@@ -18,7 +18,10 @@ a long-running compiled service instead of a static Node site. On a device's
 first start it extracts the JavaScript wrapper from `app/`, installs production
 dependencies with an available Node.js 20+ runtime, then replaces itself with
 Paperclip. If Node.js is unavailable, it downloads a checksum-pinned Bun
-runtime for the current Omnira device. Service secrets are deliberately removed
+runtime for the current Omnira device. The primary Darwin/ARM64 Bun archive is
+checksum-pinned and embedded so Omnira's minimal edge environment needs no
+runtime download. A lightweight readiness page binds immediately while the
+one-time dependency install finishes. Service secrets are deliberately removed
 from the dependency installer's environment.
 
 The default backup interval is 60 seconds, so an abrupt device loss can lose up
