@@ -4,3 +4,4 @@ app/node_modules/
 .paperclip-omnira-test/
 .paperclip-omnira-launcher/
 npm-debug.log*
+build/

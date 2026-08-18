@@ -250,6 +250,7 @@ export class EntitySnapshotStore {
   }
 
   async uploadFile(filePath) {
+    const fileStats = statSync(filePath);
     const snapshotId = `${new Date().toISOString().replace(/[:.]/g, "-")}-${randomUUID()}`;
     const chunks = [];
     const fullHash = createHash("sha256");
@@ -270,15 +271,48 @@ export class EntitySnapshotStore {
       fullHash.update(carry);
     }
 
-    const fileStats = statSync(filePath);
+    return this.commitSnapshot({
+      snapshotId,
+      chunks,
+      sizeBytes: fileStats.size,
+      sha256: fullHash.digest("hex"),
+      fileName: "paperclip.sql.gz",
+      contentType: "application/gzip",
+    });
+  }
+
+  async uploadBuffer(data, {
+    fileName = "paperclip-pglite.tar.gz",
+    contentType = "application/gzip",
+  } = {}) {
+    const bytes = Buffer.isBuffer(data) ? data : Buffer.from(data);
+    const snapshotId = `${new Date().toISOString().replace(/[:.]/g, "-")}-${randomUUID()}`;
+    const chunks = [];
+    for (let offset = 0, index = 0; offset < bytes.length || index === 0; index += 1) {
+      const chunk = bytes.subarray(offset, Math.min(offset + this.chunkBytes, bytes.length));
+      chunks.push(await this.uploadChunk(snapshotId, index, chunk));
+      offset += chunk.length;
+      if (bytes.length === 0) break;
+    }
+    return this.commitSnapshot({
+      snapshotId,
+      chunks,
+      sizeBytes: bytes.length,
+      sha256: sha256(bytes),
+      fileName,
+      contentType,
+    });
+  }
+
+  async commitSnapshot({ snapshotId, chunks, sizeBytes, sha256: digest, fileName, contentType }) {
     const manifest = {
       version: 1,
       snapshotId,
       createdAt: new Date().toISOString(),
-      fileName: "paperclip.sql.gz",
-      contentType: "application/gzip",
-      sizeBytes: fileStats.size,
-      sha256: fullHash.digest("hex"),
+      fileName,
+      contentType,
+      sizeBytes,
+      sha256: digest,
       chunks,
     };
     const manifestKey = this.key(`snapshots/${snapshotId}/manifest.json`);
@@ -308,29 +342,13 @@ export class EntitySnapshotStore {
   }
 
   async downloadLatest(destinationPath) {
-    const latest = await this.getLatest();
-    if (!latest) return null;
-    const manifestBlock = await this.client.getJson(latest.value.manifestKey);
-    const manifest = manifestBlock.value;
+    const restored = await this.downloadBuffer();
+    if (!restored) return null;
     mkdirSync(dirname(destinationPath), { recursive: true });
     const writer = createWriteStream(destinationPath, { flags: "w" });
-    const fullHash = createHash("sha256");
-    let sizeBytes = 0;
-
     try {
-      for (const expected of manifest.chunks) {
-        const block = await this.client.get(expected.key);
-        if (block.data.length !== Number(expected.sizeBytes)) {
-          throw new Error(`Snapshot chunk ${expected.key} has the wrong size`);
-        }
-        if (sha256(block.data) !== expected.sha256) {
-          throw new Error(`Snapshot chunk ${expected.key} failed SHA-256 verification`);
-        }
-        fullHash.update(block.data);
-        sizeBytes += block.data.length;
-        if (!writer.write(block.data)) {
-          await new Promise((resolve) => writer.once("drain", resolve));
-        }
+      if (!writer.write(restored.data)) {
+        await new Promise((resolve) => writer.once("drain", resolve));
       }
       await new Promise((resolve, reject) => {
         writer.once("error", reject);
@@ -346,12 +364,35 @@ export class EntitySnapshotStore {
       throw error;
     }
 
+    return restored.snapshot;
+  }
+
+  async downloadBuffer() {
+    const latest = await this.getLatest();
+    if (!latest) return null;
+    const manifestBlock = await this.client.getJson(latest.value.manifestKey);
+    const manifest = manifestBlock.value;
+    const chunks = [];
+    const fullHash = createHash("sha256");
+    let sizeBytes = 0;
+    for (const expected of manifest.chunks) {
+      const block = await this.client.get(expected.key);
+      if (block.data.length !== Number(expected.sizeBytes)) {
+        throw new Error(`Snapshot chunk ${expected.key} has the wrong size`);
+      }
+      if (sha256(block.data) !== expected.sha256) {
+        throw new Error(`Snapshot chunk ${expected.key} failed SHA-256 verification`);
+      }
+      fullHash.update(block.data);
+      sizeBytes += block.data.length;
+      chunks.push(block.data);
+    }
     if (sizeBytes !== Number(manifest.sizeBytes)) {
       throw new Error("Restored snapshot has the wrong size");
     }
     if (fullHash.digest("hex") !== manifest.sha256) {
       throw new Error("Restored snapshot failed SHA-256 verification");
     }
-    return latest.value;
+    return { snapshot: latest.value, manifest, data: Buffer.concat(chunks, sizeBytes) };
   }
 }
