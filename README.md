@@ -3,30 +3,29 @@
 An Omnira deployment wrapper for the MIT-licensed
 [Paperclip](https://github.com/paperclipai/paperclip) runtime.
 
-This variant uses the Omnira Entity Service BlockStore as Paperclip's durable
-backing store. Paperclip keeps a private embedded PostgreSQL process as its SQL
-execution engine, while the wrapper provides:
+This variant uses the Omnira Entity Service BlockStore as Paperclip's **only
+durable backing store**. It runs PostgreSQL-compatible SQL in an in-memory
+[PGlite](https://pglite.dev/) WASM engine and provides:
 
-- SHA-256-verified, chunked logical database snapshots in Entity Service
-- snapshots of Paperclip config, its secrets key, and local attachments
+- SHA-256-verified, chunked PGlite snapshots in Entity Service
+- direct Entity-block storage for Paperclip attachments (including ranges and tombstones)
 - a CAS-protected leader lease so only one Omnira device can accept writes
 - automatic restore and promotion when a fresh device becomes leader
 - a `GET /_omnira/storage` proof/health endpoint
+- no `DATABASE_URL`, external database, or durable local filesystem
 
-The repository root is a small Go launcher so Omnira recognizes the project as
-a long-running compiled service instead of a static Node site. On a device's
-first start it extracts the JavaScript wrapper from `app/`, installs production
-dependencies with an available Node.js 20+ runtime, then replaces itself with
-Paperclip. If Node.js is unavailable, it downloads a checksum-pinned Bun
-runtime for the current Omnira device. The primary Darwin/ARM64 Bun archive is
-checksum-pinned and embedded so Omnira's minimal edge environment needs no
-runtime download. A lightweight readiness page binds immediately while the
-one-time dependency install finishes. Service secrets are deliberately removed
-from the dependency installer's environment.
+The production build is one compiled Bun executable containing Paperclip,
+PGlite, PostgreSQL extensions, all 182 upstream migrations, and all UI assets.
+The repository root is a small Go launcher so Omnira recognizes it as a compiled
+service. The launcher expands the compressed executable, waits until Paperclip
+has restored Entity state and preloaded every embedded asset, then unlinks the
+temporary executable and directory. There is no runtime package install and no
+runtime file that Omnira cleanup can remove.
 
-The default backup interval is 60 seconds, so an abrupt device loss can lose up
-to roughly one interval of recent writes. Use a shared managed PostgreSQL server
-instead when zero-RPO failover is required.
+Database snapshots are scheduled after successful mutating requests and on
+graceful shutdown. A periodic integrity pass backs up only when the database is
+dirty. This is crash-consistent snapshot durability, not zero-RPO synchronous
+replication.
 
 ## Required Omnira settings
 
@@ -43,12 +42,11 @@ The service principal must be permitted to read and write the `paperclip`
 BlockStore namespace. Keep the API key in Omnira service settings; never commit
 it to this repository.
 
-Optional tuning:
+Optional configuration:
 
 ```text
-OMNIRA_ENTITY_BACKUP_INTERVAL_SECONDS=60
-OMNIRA_ENTITY_LEASE_TTL_SECONDS=45
 PAPERCLIP_INSTANCE_ID=default
+PAPERCLIP_PUBLIC_URL=https://paperclip-k4u67azzg5.app.omnira.dev
 ```
 
 ## Run and verify
@@ -61,7 +59,16 @@ cd app
 npm ci
 npm run build
 npm test
+bun scripts/build-standalone.mjs bun-darwin-arm64 ../build/paperclip-entity-darwin-arm64
 npm start
+```
+
+After building the standalone executable, refresh the checked-in compressed
+Darwin/ARM64 deployment asset:
+
+```sh
+zip -j -9 -FS assets/paperclip-entity-darwin-arm64.zip build/paperclip-entity-darwin-arm64
+go test ./...
 ```
 
 After startup, open `/_omnira/storage`. A ready writer reports:
@@ -69,12 +76,13 @@ After startup, open `/_omnira/storage`. A ready writer reports:
 ```json
 {
   "ok": true,
-  "storageBackend": "omnira-entity-blockstore",
-  "mode": "leader",
-  "paperclipHealth": "ok",
-  "durableStore": "Omnira Entity Service BlockStore"
+  "mode": "strict-entity-only",
+  "databaseEngine": "PGlite (in-memory PostgreSQL/WASM)",
+  "databaseTables": 156,
+  "migrations": { "appliedNow": 0, "appliedTotal": 182 },
+  "durableStore": "Omnira Entity Service BlockStore",
+  "externalDatabase": false,
+  "durableLocalDisk": false,
+  "uiAssetsEmbedded": 203
 }
 ```
-
-For a legacy local-only development instance without Entity Service, set
-`PAPERCLIP_STORAGE_BACKEND=local`.

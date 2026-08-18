@@ -7,15 +7,15 @@
     "node": ">=20"
   },
   "scripts": {
-    "build": "node --check server.mjs && node --check lib/entity-store.mjs && node --check lib/entity-backed-postgres.mjs && node --check lib/entity-runtime.mjs",
-    "start": "node server.mjs",
+    "build": "node --check entity-only-server.mjs && node --check lib/entity-store.mjs && node --check lib/entity-storage.mjs && node scripts/generate-embedded-assets.mjs",
+    "build:standalone": "bun scripts/build-standalone.mjs",
+    "start": "bun entity-only-server.mjs",
     "test": "node --test test/*.test.mjs"
   },
   "dependencies": {
+    "@electric-sql/pglite": "0.3.15",
     "@paperclipai/db": "2026.722.0",
-    "embedded-postgres": "^18.1.0-beta.16",
-    "paperclipai": "2026.722.0",
-    "postgres": "^3.4.9",
-    "tar": "^7.4.3"
+    "@paperclipai/server": "2026.722.0",
+    "drizzle-orm": "0.45.2"
   }
 }

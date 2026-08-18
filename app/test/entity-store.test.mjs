@@ -93,3 +93,20 @@ test("EntitySnapshotStore restores chunked snapshots with SHA-256 verification",
   assert.equal(restored.snapshotId, uploaded.snapshotId);
   assert.deepEqual(readFileSync(destination), expected);
 });
+
+test("EntitySnapshotStore round-trips an in-memory PGlite archive", async (t) => {
+  const mock = await startEntityServiceMock();
+  t.after(() => mock.close());
+  const expected = Buffer.from("pglite-memory-archive".repeat(300));
+  const snapshots = new EntitySnapshotStore({
+    client: clientFor(mock),
+    keyPrefix: "paperclip/instances/default/database-pglite-v1",
+    chunkBytes: 193,
+  });
+
+  const uploaded = await snapshots.uploadBuffer(expected);
+  const restored = await snapshots.downloadBuffer();
+  assert.equal(restored.snapshot.snapshotId, uploaded.snapshotId);
+  assert.equal(restored.manifest.fileName, "paperclip-pglite.tar.gz");
+  assert.deepEqual(restored.data, expected);
+});
