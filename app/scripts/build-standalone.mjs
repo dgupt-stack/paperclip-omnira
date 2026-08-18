@@ -1,4 +1,4 @@
-import { mkdir, readFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -73,6 +73,21 @@ const unusedRuntimeStubsPlugin = {
       },
     );
     build.onLoad(
+      { filter: /jsdom\/lib\/jsdom\/living\/xhr\/XMLHttpRequest-impl\.js$/ },
+      async (args) => {
+        let contents = await readFile(args.path, "utf8");
+        const needle = "const syncWorkerFile = require.resolve(\"./xhr-sync-worker.js\");";
+        if (!contents.includes(needle)) {
+          throw new Error("The installed jsdom sync-XHR worker loader no longer matches the standalone patch");
+        }
+        contents = contents.replace(
+          needle,
+          "const syncWorkerFile = globalThis.__PAPERCLIP_JSDOM_SYNC_XHR_WORKER_PATH__ || '';",
+        );
+        return { contents, loader: "js" };
+      },
+    );
+    build.onLoad(
       { filter: /@paperclipai\/server\/dist\/middleware\/logger\.js$/ },
       async (args) => {
         let contents = await readFile(args.path, "utf8");
@@ -138,6 +153,25 @@ const unusedRuntimeStubsPlugin = {
     );
   },
 };
+
+const jsdomWorkerSource = join(
+  appDir,
+  "node_modules/jsdom/lib/jsdom/living/xhr/xhr-sync-worker.js",
+);
+const jsdomWorkerOutput = join(appDir, "generated/jsdom-xhr-sync-worker.bundle.js");
+const jsdomWorkerResult = await Bun.build({
+  entrypoints: [jsdomWorkerSource],
+  target: "bun",
+  format: "esm",
+  minify: true,
+  sourcemap: "none",
+  plugins: [unusedRuntimeStubsPlugin],
+});
+if (!jsdomWorkerResult.success || jsdomWorkerResult.outputs.length !== 1) {
+  for (const message of jsdomWorkerResult.logs) console.error(message);
+  throw new Error("Failed to bundle jsdom sync-XHR worker");
+}
+await writeFile(jsdomWorkerOutput, await jsdomWorkerResult.outputs[0].arrayBuffer());
 
 const result = await Bun.build({
   entrypoints: [join(appDir, "entity-only-server.mjs")],

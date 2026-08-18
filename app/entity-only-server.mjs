@@ -4,6 +4,7 @@ import { hostname } from "node:os";
 import { basename, dirname, extname } from "node:path";
 import { createServer } from "node:http";
 import { EMBEDDED_UI_ASSETS } from "./generated/embedded-assets.mjs";
+import jsdomSyncXhrWorkerPath from "./generated/jsdom-xhr-sync-worker.bundle.js" with { type: "file" };
 import { createEntityPglite } from "./lib/entity-pglite.mjs";
 import { createEntityStorageProvider } from "./lib/entity-storage.mjs";
 import {
@@ -11,6 +12,8 @@ import {
   EntitySnapshotStore,
   EntityStoreClient,
 } from "./lib/entity-store.mjs";
+
+globalThis.__PAPERCLIP_JSDOM_SYNC_XHR_WORKER_PATH__ = jsdomSyncXhrWorkerPath;
 
 const VERSION = "2026.722.0-entity.1";
 const INSTANCE_ID = process.env.PAPERCLIP_INSTANCE_ID?.trim() || "default";
