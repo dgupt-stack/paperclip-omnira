@@ -51,6 +51,28 @@ const unusedRuntimeStubsPlugin = {
       loader: "js",
     }));
     build.onLoad(
+      { filter: /jsdom\/lib\/jsdom\/living\/helpers\/style-rules\.js$/ },
+      async (args) => {
+        let contents = await readFile(args.path, "utf8");
+        const stylesheetPath = join(dirname(args.path), "../../browser/default-stylesheet.css");
+        const stylesheet = await readFile(stylesheetPath, "utf8");
+        const needle = [
+          "const defaultStyleSheet = fs.readFileSync(",
+          "  path.resolve(__dirname, \"../../browser/default-stylesheet.css\"),",
+          "  { encoding: \"utf-8\" }",
+          ");",
+        ].join("\n");
+        if (!contents.includes(needle)) {
+          throw new Error("The installed jsdom stylesheet loader no longer matches the standalone patch");
+        }
+        contents = contents.replace(
+          needle,
+          `const defaultStyleSheet = ${JSON.stringify(stylesheet)};`,
+        );
+        return { contents, loader: "js" };
+      },
+    );
+    build.onLoad(
       { filter: /@paperclipai\/server\/dist\/middleware\/logger\.js$/ },
       async (args) => {
         let contents = await readFile(args.path, "utf8");
