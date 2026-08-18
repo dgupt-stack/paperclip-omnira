@@ -43,6 +43,15 @@ The service principal must be permitted to read and write the `paperclip`
 BlockStore namespace. Keep the API key in Omnira service settings; never commit
 it to this repository.
 
+For the current Darwin deployment, the launcher prefers an injected
+`OMNIRA_ENTITY_API_KEY` and otherwise reads the dedicated Paperclip service
+principal from the owner-only, mode-`0600` file
+`/Users/djgupt/api-keys/paperclip-omnira-entity-key.txt`. The public Entity URL,
+owner ID, namespace, storage backend, and exposure mode have account-specific
+non-secret defaults in the launcher. Target this deployment to the owned Mac
+that holds the protected credential file. Paperclip database and attachment
+data never use that disk; the file is authentication material only.
+
 Optional configuration:
 
 ```text

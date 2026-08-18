@@ -23,6 +23,13 @@ type serviceBinding struct {
 	port string
 }
 
+const (
+	defaultEntityURL        = "https://entityservice-k4u67azzg5.app.omnira.dev"
+	defaultEntityOwnerID    = "5695892345266999354"
+	defaultEntityNamespace  = "paperclip"
+	defaultEntityAPIKeyPath = "/Users/djgupt/api-keys/paperclip-omnira-entity-key.txt"
+)
+
 func main() {
 	if err := run(); err != nil {
 		fmt.Fprintf(os.Stderr, "[paperclip-entity-launcher] %v\n", err)
@@ -37,6 +44,9 @@ func run() error {
 	}
 	if err := os.Setenv("PORT", binding.port); err != nil {
 		return fmt.Errorf("set service port: %w", err)
+	}
+	if err := configureEntityEnvironment(defaultEntityAPIKeyPath); err != nil {
+		return err
 	}
 
 	// Replace the Omnira service process before opening the public port. Once a
@@ -59,6 +69,38 @@ func run() error {
 		return fmt.Errorf("clear inherited listener: %w", err)
 	}
 	return syscall.Exec(executablePath, []string{executablePath}, os.Environ())
+}
+
+func configureEntityEnvironment(apiKeyPath string) error {
+	defaults := map[string]string{
+		"OMNIRA_ENTITY_URL":             defaultEntityURL,
+		"OMNIRA_ENTITY_OWNER_ID":        defaultEntityOwnerID,
+		"OMNIRA_ENTITY_NAMESPACE":       defaultEntityNamespace,
+		"PAPERCLIP_STORAGE_BACKEND":     "omnira-entity",
+		"PAPERCLIP_DEPLOYMENT_EXPOSURE": "public",
+	}
+	for key, value := range defaults {
+		if strings.TrimSpace(os.Getenv(key)) == "" {
+			if err := os.Setenv(key, value); err != nil {
+				return fmt.Errorf("set %s: %w", key, err)
+			}
+		}
+	}
+	if strings.TrimSpace(os.Getenv("OMNIRA_ENTITY_API_KEY")) != "" {
+		return nil
+	}
+	rawKey, err := os.ReadFile(apiKeyPath)
+	if err != nil {
+		return fmt.Errorf("strict Entity-only credential is unavailable: %w", err)
+	}
+	apiKey := strings.TrimSpace(string(rawKey))
+	if apiKey == "" {
+		return fmt.Errorf("strict Entity-only credential file is empty")
+	}
+	if err := os.Setenv("OMNIRA_ENTITY_API_KEY", apiKey); err != nil {
+		return fmt.Errorf("set strict Entity-only credential: %w", err)
+	}
+	return nil
 }
 
 func availableLoopbackPort() (string, error) {
