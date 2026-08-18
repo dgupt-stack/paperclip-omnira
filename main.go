@@ -38,21 +38,11 @@ func run() error {
 	if err := os.Setenv("PORT", binding.port); err != nil {
 		return fmt.Errorf("set service port: %w", err)
 	}
-	childReady := &atomic.Bool{}
-	bootstrapServer, err := startGateway(binding, "1", childReady)
-	if err != nil {
-		return err
-	}
-	defer bootstrapServer.Close()
 
-	homeDirectory, err := os.UserHomeDir()
-	if err != nil {
-		return fmt.Errorf("resolve transient runtime home: %w", err)
-	}
-	for _, staleDirectory := range staleRuntimeDirectories(homeDirectory) {
-		_ = os.RemoveAll(staleDirectory)
-	}
-	temporaryDir, err := os.MkdirTemp(homeDirectory, ".paperclip-entity-runtime-")
+	// Replace the Omnira service process before opening the public port. Once a
+	// service starts listening, the runner removes its writable launch sandbox;
+	// exec first so the strict runtime is already mapped into the root process.
+	temporaryDir, err := os.MkdirTemp("", ".paperclip-entity-runtime-")
 	if err != nil {
 		return fmt.Errorf("create transient runtime directory: %w", err)
 	}
@@ -68,22 +58,7 @@ func run() error {
 	if err := os.Unsetenv("PAPERCLIP_LISTEN_FD"); err != nil {
 		return fmt.Errorf("clear inherited listener: %w", err)
 	}
-	// Give the edge runner enough time to observe the bootstrap listener before
-	// replacing this process. Paperclip binds the same port at the very start of
-	// its executable, before restoring Entity data or initializing PGlite.
-	time.Sleep(500 * time.Millisecond)
-	if err := bootstrapServer.Close(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		return fmt.Errorf("stop bootstrap listener: %w", err)
-	}
 	return syscall.Exec(executablePath, []string{executablePath}, os.Environ())
-}
-
-func staleRuntimeDirectories(homeDirectory string) []string {
-	matches, err := filepath.Glob(filepath.Join(homeDirectory, ".paperclip-entity-runtime-*"))
-	if err != nil {
-		return nil
-	}
-	return matches
 }
 
 func availableLoopbackPort() (string, error) {
