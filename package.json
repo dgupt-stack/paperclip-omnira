@@ -7,10 +7,15 @@
     "node": ">=20"
   },
   "scripts": {
-    "build": "node --check server.mjs",
-    "start": "node server.mjs"
+    "build": "node --check server.mjs && node --check lib/entity-store.mjs && node --check lib/entity-backed-postgres.mjs && node --check lib/entity-runtime.mjs",
+    "start": "node server.mjs",
+    "test": "node --test test/*.test.mjs"
   },
   "dependencies": {
-    "paperclipai": "2026.722.0"
+    "@paperclipai/db": "2026.722.0",
+    "embedded-postgres": "^18.1.0-beta.16",
+    "paperclipai": "2026.722.0",
+    "postgres": "^3.4.9",
+    "tar": "^7.4.3"
   }
 }
