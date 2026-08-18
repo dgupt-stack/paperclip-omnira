@@ -8,7 +8,9 @@ import {
 } from "node:fs";
 import { dirname } from "node:path";
 
-const DEFAULT_CHUNK_BYTES = 3 * 1024 * 1024;
+// Entity blocks travel through Omnira's gRPC tunnel as base64 JSON. Keep each
+// raw chunk comfortably below the 4 MiB transport frame after encoding.
+const DEFAULT_CHUNK_BYTES = 512 * 1024;
 
 function sha256(value) {
   return createHash("sha256").update(value).digest("hex");

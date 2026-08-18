@@ -14,6 +14,9 @@ durable backing store**. It runs PostgreSQL-compatible SQL in an in-memory
 - a `GET /_omnira/storage` proof/health endpoint
 - no `DATABASE_URL`, external database, or durable local filesystem
 
+Snapshot and attachment payloads use 512 KiB Entity blocks so their base64 JSON
+envelopes stay safely below Omnira's gRPC transport frame limit.
+
 The production build is one compiled Bun executable containing Paperclip,
 PGlite, PostgreSQL extensions, all 182 upstream migrations, and all UI assets.
 The repository root is a small Go launcher so Omnira recognizes it as a compiled
